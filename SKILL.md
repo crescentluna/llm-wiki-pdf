@@ -1,24 +1,27 @@
 ---
 name: llm-wiki-pdf
-description: Initialize and maintain a Karpathy-style LLM-Wiki for academic papers. Extracts PDF papers to structured Markdown with figure mapping. Supports dual extraction backends (MinerU VLM API preferred, pymupdf4llm fallback). Use when the user mentions LLM-Wiki, paper knowledge base, PDF extraction for wiki, Karpathy wiki, or wants to build a structured knowledge base from academic papers.
+description: 初始化和维护 Karpathy 风格的 LLM-Wiki 学术论文知识库。将 PDF 论文提取为结构化 Markdown 并进行图片映射。支持双提取后端（MinerU VLM API 优先，pymupdf4llm 备选）。当用户提到 LLM-Wiki、论文知识库、PDF 提取、Karpathy wiki，或希望从学术论文构建结构化知识库时使用。
+author:
+  empId: "85571"
+  avatar: "avatar.png"
 ---
 
-# LLM-Wiki PDF Extraction
+# LLM-Wiki PDF 提取
 
-Build and maintain a Karpathy-style LLM-Wiki knowledge base from academic PDF papers.
+从学术 PDF 论文构建和维护 Karpathy 风格的 LLM-Wiki 知识库。
 
-## Overview
+## 概述
 
-This skill provides:
-1. **PDF to Markdown extraction** with dual backend support (MinerU VLM API / pymupdf4llm)
-2. **Figure extraction** with heuristic Figure-number mapping
-3. **AGENTS.md template** for initializing new LLM-Wiki projects
+本 Skill 提供：
+1. **PDF 转 Markdown 提取**，支持双后端（MinerU VLM API / pymupdf4llm）
+2. **图片提取**，带启发式 Figure 编号映射
+3. **AGENTS.md 模板**，用于初始化新的 LLM-Wiki 项目
 
-## Quick Start
+## 快速开始
 
-### Initialize a new LLM-Wiki project
+### 初始化新的 LLM-Wiki 项目
 
-1. Copy scripts to the target project:
+1. 将脚本复制到目标项目：
 ```bash
 cp scripts/extract_pdf.py <project>/
 cp scripts/extract_pdf_mineru.py <project>/
@@ -26,88 +29,88 @@ cp scripts/extract_pdf_pymupdf.py <project>/
 cp AGENTS_TEMPLATE.md <project>/AGENTS.md
 ```
 
-2. Create the directory structure:
+2. 创建目录结构：
 ```bash
 mkdir -p <project>/raw <project>/wiki/{sources,assets/figures,entities/{models,methods},concepts,synthesis}
 ```
 
-3. Place PDF papers in `<project>/raw/`
+3. 将 PDF 论文放入 `<project>/raw/`
 
-4. Run extraction:
+4. 运行提取：
 ```bash
-# Auto-selects: MinerU if TOKEN is set, otherwise pymupdf4llm
+# 自动选择：如果配置了 TOKEN 则使用 MinerU，否则使用 pymupdf4llm
 python extract_pdf.py
 
-# Or explicitly choose backend:
-python extract_pdf_mineru.py --all     # MinerU VLM (recommended)
-python extract_pdf_pymupdf.py --all    # pymupdf4llm (fallback)
+# 或显式指定后端：
+python extract_pdf_mineru.py --all     # MinerU VLM（推荐）
+python extract_pdf_pymupdf.py --all    # pymupdf4llm（备选）
 ```
 
-## Backend Selection Logic
+## 后端选择逻辑
 
-The unified `extract_pdf.py` entry point:
-- Checks for `MINERU_TOKEN` environment variable or `TOKEN` in `extract_pdf_mineru.py`
-- If token is configured and non-empty: uses **MinerU VLM API** (better quality)
-- If token is empty/missing: falls back to **pymupdf4llm** (local, no network needed)
+统一入口 `extract_pdf.py` 的选择逻辑：
+- 检查 `MINERU_TOKEN` 环境变量或 `extract_pdf_mineru.py` 中的 `TOKEN` 变量
+- 如果 Token 已配置且非空：使用 **MinerU VLM API**（质量更高）
+- 如果 Token 为空或缺失：回退到 **pymupdf4llm**（本地运行，无需网络）
 
-### MinerU VLM (Recommended)
+### MinerU VLM（推荐）
 
-| Advantage | Detail |
-|-----------|--------|
-| Image recognition | VLM-based, distinguishes figures from formula renderings |
-| Formula extraction | Higher quality LaTeX restoration |
-| Table parsing | Structural recognition, preserves alignment |
-| Free quota | 5000 documents/day, max 200 pages each |
+| 优势 | 说明 |
+|------|------|
+| 图片识别 | 基于 VLM，能区分论文插图与公式渲染图 |
+| 公式提取 | 更高质量的 LaTeX 还原 |
+| 表格解析 | 结构化识别，保留对齐格式 |
+| 免费额度 | 每天 5000 篇文档，每篇最多 200 页 |
 
-**Setup**: Visit https://mineru.net/apiManage/docs, register, get API key. Set as:
+**配置方法**：访问 https://mineru.net/apiManage/docs ，注册后获取 API Key，设置环境变量：
 ```bash
 export MINERU_TOKEN="your-api-key-here"
 ```
 
-### PyMuPDF4LLM (Fallback)
+### PyMuPDF4LLM（备选）
 
-Runs locally, no network needed. Install:
+本地运行，无需网络。安装依赖：
 ```bash
 pip install pymupdf4llm pymupdf pillow
 ```
 
-## Output Structure
+## 输出结构
 
 ```
-wiki/sources/{paper_id}.md          # Paper Markdown with frontmatter
+wiki/sources/{paper_id}.md          # 论文 Markdown（含 frontmatter 元信息）
 wiki/assets/figures/{paper_id}/
-    fig1.png ... figN.png           # Extracted figures (global ordering)
-    _index.json                     # Figure index with figure_label mapping
+    fig1.png ... figN.png           # 提取的图片（全局编号）
+    _index.json                     # 图片索引，含 figure_label 映射
 ```
 
-## Key Innovation: Figure Mapping
+## 核心创新：图片映射
 
-The `_index.json` maps extracted images to paper Figure numbers via:
-1. Text-position nearest-neighbor matching (distance < 5000 chars)
-2. Area-based primary figure selection (largest image wins per Figure)
+`_index.json` 通过以下方式将提取图片映射到论文 Figure 编号：
+1. 文本位置最近邻匹配（距离 < 5000 字符）
+2. 基于面积的主图选择（同一 Figure 下最大图片优先）
 
-LLM agents use `_index.json` to precisely reference correct figures in entity pages.
+LLM Agent 使用 `_index.json` 在实体页面中精确引用正确的图片。
 
-## Commands
+## 命令
 
-All scripts support:
+所有脚本支持以下参数：
 ```bash
-python <script>.py              # Incremental extraction
-python <script>.py --all        # Full extraction
-python <script>.py --force PID  # Force re-extract specific paper
-python <script>.py --list       # List extraction status
+python <script>.py              # 增量提取
+python <script>.py --all        # 全量提取
+python <script>.py --force PID  # 强制重新提取指定论文
+python <script>.py --list       # 查看提取状态
 ```
 
-## AGENTS.md Template
+## AGENTS.md 模板
 
-Use `AGENTS_TEMPLATE.md` as the Schema layer for new projects. Customize:
-- Research topic and tags
-- Entity categories (models/methods/datasets)
-- Page format conventions
+使用 `AGENTS_TEMPLATE.md` 作为新项目的 Schema 层。可自定义：
+- 研究主题和标签
+- 实体分类（模型/方法/数据集）
+- 页面格式规范
 
-See [AGENTS_TEMPLATE.md](AGENTS_TEMPLATE.md) for the full template.
+完整模板参见 [AGENTS_TEMPLATE.md](AGENTS_TEMPLATE.md)。
 
-## Dependencies
+## 依赖
 
 ```bash
 pip install pymupdf pymupdf4llm pillow requests
