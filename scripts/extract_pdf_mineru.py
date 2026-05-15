@@ -16,7 +16,14 @@
     python extract_pdf_mineru.py --all         # 全量提取
     python extract_pdf_mineru.py --force PID   # 强制重抽指定论文
     python extract_pdf_mineru.py --list        # 列出待提取状态
-    python extract_pdf_mineru.py --keep-raw    # 保留 MinerU 解压产物到 mineru_test/
+    python extract_pdf_mineru.py --keep-raw    # 保留 MinerU 解压产物到 mineru_result/
+    python extract_pdf_mineru.py --fig-dpi 300 # 图片渲染 300 DPI（默认 400）
+
+升级要点（参考 extract_pdf_mineru(1).py）：
+  * 图片高分辨率渲染：优先用 PyMuPDF 从原 PDF 按 bbox 渲染高 DPI 图，
+    质量显著优于 MinerU 默认导出的 JPG；失败时回退到 MinerU 原图
+  * 同时收集 image 与 chart 类型 block
+  * TOKEN 优先从环境变量 MINERU_TOKEN 读取，未设置时回退到内置 TOKEN
 """
 
 from __future__ import annotations
@@ -41,9 +48,15 @@ from PIL import Image
 # =========================================================================
 # 配置
 # =========================================================================
-# MinerU API Token - 从环境变量 MINERU_TOKEN 获取，或直接填写在此处
-# 申请地址: https://mineru.net/apiManage/docs (免费，单日上限5000份文档，每份不超过200页)
-TOKEN = os.environ.get("MINERU_TOKEN", "").strip()
+# MinerU API Token：优先 env MINERU_TOKEN，否则回退到内置 token
+_FALLBACK_TOKEN = (
+    "eyJ0eXBlIjoiSldUIiwiYWxnIjoiSFM1MTIifQ.eyJqdGkiOiIyNjAwMDQxNCIsInJvbCI6IlJPTEVfUkVHSVNURVIi"
+    "LCJpc3MiOiJPcGVuWExhYiIsImlhdCI6MTc3ODU1NTk1NCwiY2xpZW50SWQiOiJsa3pkeDU3bnZ5MjJqa3BxOXgydyIs"
+    "InBob25lIjoiIiwib3BlbklkIjpudWxsLCJ1dWlkIjoiNjU5NDQ2YmMtNzY3OS00MWQ2LWJjZTItMGYxZmY1MzMyM2Fk"
+    "IiwiZW1haWwiOiIiLCJleHAiOjE3ODYzMzE5NTR9.SWxU82KyOcgORKiWrISNnZHtnmhE3lPp"
+    "-vH-ur5_L3-ECIKXQmWjiJB7D1eMOnhk6ASb8LOK_qcO784yQ4ofHQ"
+)
+TOKEN = os.environ.get("MINERU_TOKEN", "").strip() or _FALLBACK_TOKEN
 
 API_BASE = "https://mineru.net/api/v4"
 BATCH_URL = f"{API_BASE}/file-urls/batch"
@@ -54,6 +67,8 @@ DEFAULT_MODEL_VERSION = "vlm"
 
 POLL_INTERVAL = 10          # 秒
 POLL_TIMEOUT = 60 * 30      # 单批次最多 30 分钟
+
+DEFAULT_FIG_ZOOM = 400 / 72  # 图片渲染倍率，≈5.56x = 400 DPI
 
 HEADERS_JSON = {
     "Content-Type": "application/json",
@@ -122,7 +137,6 @@ _JOURNAL_PATTERNS = [
 _UNIQUE_ACRONYM_PATTERNS = [
     (r"\bSIGKDD\b", "KDD"),
     (r"\bNeurIPS\b", "NeurIPS"),
-    (r"\bRecSys\b", "RecSys"),
     (r"\bWSDM\b", "WSDM"),
     (r"\bICLR\b", "ICLR"),
     (r"\bICML\b", "ICML"),
@@ -313,7 +327,7 @@ def _page_head_text(content_list: list[dict], max_chars: int = 8000) -> str:
     for b in content_list:
         if b.get("page_idx", 0) > 1:  # 取前两页
             continue
-        if b.get("type") not in ("text", "title", "equation"):
+        if b.get("type") not in ("text", "title", "equation", "page_footnote"):
             continue
         t = b.get("text") or b.get("content") or ""
         if not t:
@@ -336,6 +350,41 @@ def _parse_fig_label(caption_list: list[str]) -> str:
     return ""
 
 
+def _render_figure_from_pdf(
+    doc: fitz.Document,
+    page_idx: int,
+    bbox: list[float],
+    dst: Path,
+    zoom: float,
+) -> tuple[int, int] | None:
+    """用 PyMuPDF 从 PDF 渲染 bbox 区域为高分辨率 PNG。
+
+    bbox 是 MinerU content_list 坐标系（归一化×1000）。
+    返回 (width, height) 或 None（渲染失败）。
+    """
+    if page_idx < 0 or page_idx >= len(doc):
+        return None
+    page = doc[page_idx]
+    pw, ph = page.rect.width, page.rect.height
+    rect = fitz.Rect(
+        bbox[0] / 1000 * pw,
+        bbox[1] / 1000 * ph,
+        bbox[2] / 1000 * pw,
+        bbox[3] / 1000 * ph,
+    )
+    if rect.width <= 0 or rect.height <= 0:
+        return None
+    rect = rect & page.rect
+    if rect.is_empty:
+        return None
+    mat = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=mat, clip=rect)
+    if pix.width < 5 or pix.height < 5:
+        return None
+    pix.save(str(dst))
+    return pix.width, pix.height
+
+
 def _jpg_to_png(src: Path, dst: Path) -> None:
     """把 MinerU 的 JPG 图转成 PNG；若已经是 PNG 则直接复制。"""
     if src.suffix.lower() == ".png":
@@ -354,6 +403,7 @@ def convert_mineru_to_wiki(
     sources_dir: Path,
     assets_dir: Path,
     pdf_file: Path,
+    fig_zoom: float = DEFAULT_FIG_ZOOM,
 ) -> dict:
     """将 MinerU 解压产物转换为 wiki 规范形式：md + figN.png + _index.json。
 
@@ -380,36 +430,56 @@ def convert_mineru_to_wiki(
         if re.fullmatch(r"fig\d+\.png", old.name):
             old.unlink()
 
-    # -- 遍历 content_list 提取 image block，全局顺序命名 figN.png --
-    img_blocks = [b for b in content_list if b.get("type") == "image"]
+    # -- 遍历 content_list 提取 image/chart block，全局顺序命名 figN.png --
+    # 优先从原始 PDF 渲染高分辨率版本，fallback 到 MinerU 原图
+    img_blocks = [b for b in content_list if b.get("type") in ("image", "chart")]
     fig_metadata: list[dict] = []
     name_map: dict[str, str] = {}   # 原始 img_path → fig{N}.png
+
+    pdf_doc = fitz.open(str(pdf_file))
 
     for idx, block in enumerate(img_blocks, 1):
         rel = block.get("img_path") or ""
         if not rel:
             continue
-        src = cache_dir / rel
-        if not src.exists():
-            log(f"  [WARN] {paper_id}: 图片缺失 {rel}")
-            continue
         new_name = f"fig{idx}.png"
         dst = paper_fig_dir / new_name
-        try:
-            _jpg_to_png(src, dst)
-        except Exception as e:  # noqa: BLE001
-            log(f"  [WARN] {paper_id}: 图像转换失败 {rel}: {e}")
-            continue
 
-        try:
-            with Image.open(dst) as im:
-                w, h = im.size
-        except Exception:
-            w, h = 0, 0
+        # 尝试从 PDF 高分辨率渲染
+        bbox = block.get("bbox")
+        page_idx = block.get("page_idx", 0)
+        rendered = None
+        if bbox and len(bbox) == 4:
+            try:
+                rendered = _render_figure_from_pdf(pdf_doc, page_idx, bbox, dst, fig_zoom)
+            except Exception as e:  # noqa: BLE001
+                log(f"  [WARN] {paper_id}: fig{idx} PDF 渲染失败: {e}")
 
-        figure_label = _parse_fig_label(block.get("image_caption") or [])
+        # fallback: 复制 MinerU 原图
+        if not rendered:
+            src = cache_dir / rel
+            if not src.exists():
+                log(f"  [WARN] {paper_id}: 图片缺失 {rel}")
+                continue
+            try:
+                _jpg_to_png(src, dst)
+            except Exception as e:  # noqa: BLE001
+                log(f"  [WARN] {paper_id}: 图像转换失败 {rel}: {e}")
+                continue
+
+        if rendered:
+            w, h = rendered
+        else:
+            try:
+                with Image.open(dst) as im:
+                    w, h = im.size
+            except Exception:
+                w, h = 0, 0
+
+        caption_list = block.get("image_caption") or block.get("chart_caption") or []
+        figure_label = _parse_fig_label(caption_list)
         meta = {
-            "page": int(block.get("page_idx", 0)),
+            "page": int(page_idx),
             "figure_index": idx,
             "filename": new_name,
             "path": f"assets/figures/{paper_id}/{new_name}",
@@ -417,12 +487,14 @@ def convert_mineru_to_wiki(
             "height": h,
             "size_kb": round(dst.stat().st_size / 1024, 2),
             "type": "figure",
-            "caption": " ".join(block.get("image_caption") or []).strip(),
+            "caption": " ".join(caption_list).strip(),
         }
         if figure_label:
             meta["figure_label"] = figure_label
         fig_metadata.append(meta)
         name_map[rel] = new_name
+
+    pdf_doc.close()
 
     # -- 主图筛选：同一 figure_label 的子图只保留面积最大的一张 --
     groups: dict[str, list[dict]] = defaultdict(list)
@@ -549,6 +621,7 @@ def convert_mineru_to_wiki(
             "paper_id": paper_id,
             "total_figures": len(fig_metadata),
             "extractor": "mineru-vlm",
+            "figure_render": f"pymupdf-{fig_zoom}x",
             "figures": fig_metadata,
         }
         if pdf_metadata.get("title"):
@@ -603,13 +676,6 @@ def run_mineru_batch(pdfs: list[Path], cache_root: Path, model_version: str) -> 
 
 
 def main():
-    if not TOKEN:
-        print("✗ 错误: MinerU API Token 未配置")
-        print("  请设置环境变量: export MINERU_TOKEN=\"your-api-key\"")
-        print("  或在脚本中直接设置 TOKEN 变量")
-        print("  申请地址: https://mineru.net/apiManage/docs")
-        sys.exit(1)
-
     parser = argparse.ArgumentParser(
         description="使用 MinerU VLM 将 raw/*.pdf 提取到 wiki/",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -630,6 +696,8 @@ def main():
     parser.add_argument("--model-version", default=DEFAULT_MODEL_VERSION,
                         choices=["vlm", "pipeline"],
                         help="MinerU 模型版本（默认 vlm）")
+    parser.add_argument("--fig-dpi", type=float, default=400,
+                        help="图片渲染 DPI（默认 400）")
     args = parser.parse_args()
 
     base_dir = Path(__file__).parent.resolve()
@@ -710,7 +778,10 @@ def main():
             print("✗ 无 MinerU 产出")
             continue
         try:
-            info = convert_mineru_to_wiki(pid, cache_dir, sources_dir, assets_dir, pdf)
+            info = convert_mineru_to_wiki(
+                pid, cache_dir, sources_dir, assets_dir, pdf,
+                fig_zoom=args.fig_dpi / 72,
+            )
             n = len(info["figures"])
             total_figs += n
             success += 1
